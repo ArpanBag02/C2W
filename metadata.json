@@ -1,0 +1,6 @@
+{
+  "name": "Colab2Doc",
+  "description": "Transform Google Colab and Jupyter notebook outputs into professional, verified Microsoft Word (.docx) reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
