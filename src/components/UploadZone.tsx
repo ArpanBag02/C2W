@@ -69,8 +69,8 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
         onClick={() => fileInputRef.current?.click()}
         className={`relative flex flex-col items-center justify-center rounded-2xl border-2 border-dashed p-6 text-center transition-all cursor-pointer ${
           isDragOver
-            ? 'border-blue-500 bg-blue-50/80 scale-[0.99]'
-            : 'border-slate-300 bg-slate-50/60 hover:border-blue-400 hover:bg-slate-50'
+            ? 'border-blue-500 bg-blue-50/80 dark:bg-blue-950/40 scale-[0.99]'
+            : 'border-slate-300 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/40 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-slate-50 dark:hover:bg-slate-800/60'
         }`}
       >
         <input
@@ -82,14 +82,14 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
           className="hidden"
         />
 
-        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white shadow-sm border border-slate-200 text-blue-600 mb-3">
+        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white dark:bg-slate-800 shadow-sm border border-slate-200 dark:border-slate-700 text-blue-600 dark:text-blue-400 mb-3">
           <UploadCloud className="h-6 w-6" />
         </div>
 
-        <h3 className="text-sm font-semibold text-slate-800">
-          Drop your Google Colab or Jupyter <span className="text-blue-600 font-mono">.ipynb</span>
+        <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+          Drop your Google Colab or Jupyter <span className="text-blue-600 dark:text-blue-400 font-mono">.ipynb</span>
         </h3>
-        <p className="mt-1 text-xs text-slate-500">
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
           or click to browse from your computer (processed locally)
         </p>
 
@@ -100,7 +100,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
               e.stopPropagation();
               onLoadSample();
             }}
-            className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1 text-xs font-semibold text-blue-600 border border-blue-200 shadow-2xs hover:bg-blue-50 transition"
+            className="inline-flex items-center gap-1.5 rounded-full bg-white dark:bg-slate-800 px-3 py-1 text-xs font-semibold text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-900 shadow-2xs hover:bg-blue-50 dark:hover:bg-slate-700 transition"
           >
             <Sparkles className="h-3 w-3" />
             <span>Load sample notebook instead</span>
@@ -110,17 +110,17 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
 
       {/* Selected File Details */}
       {notebookMeta && (
-        <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-2xs">
+        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3.5 shadow-2xs">
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-center gap-2.5 min-w-0">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-100 text-blue-700">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300">
                 <FileCode2 className="h-5 w-5" />
               </div>
               <div className="min-w-0">
-                <h4 className="text-xs font-bold text-slate-900 truncate">
+                <h4 className="text-xs font-bold text-slate-900 dark:text-white truncate">
                   {notebookMeta.name}
                 </h4>
-                <div className="flex items-center gap-2 text-[11px] text-slate-500 mt-0.5">
+                <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
                   <span>{formatBytes(notebookMeta.size)}</span>
                   <span>•</span>
                   <span>{notebookMeta.codeCells} code cell{notebookMeta.codeCells === 1 ? '' : 's'}</span>
@@ -138,20 +138,20 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
               type="button"
               onClick={onReset}
               title="Change notebook"
-              className="text-slate-400 hover:text-slate-600 p-1 transition"
+              className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-1 transition"
             >
               <RefreshCw className="h-3.5 w-3.5" />
             </button>
           </div>
 
           {/* Action Trigger */}
-          <div className="mt-3 pt-3 border-t border-slate-100 flex items-center gap-2">
+          <div className="mt-3 pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2">
             <button
               id="extract-outputs-btn"
               type="button"
               onClick={onExtract}
               disabled={isProcessing}
-              className="w-full flex items-center justify-center gap-2 rounded-lg bg-blue-600 py-2.5 px-3 text-xs font-semibold text-white shadow-xs hover:bg-blue-700 active:scale-[0.98] transition disabled:opacity-50"
+              className="w-full flex items-center justify-center gap-2 rounded-lg bg-blue-600 hover:bg-blue-700 py-2.5 px-3 text-xs font-semibold text-white shadow-xs active:scale-[0.98] transition disabled:opacity-50"
             >
               {isProcessing ? (
                 <>
@@ -176,18 +176,18 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
 
       {/* Extraction Progress Bar */}
       {isProcessing && (
-        <div className="rounded-xl border border-blue-100 bg-blue-50/70 p-3">
-          <div className="flex items-center justify-between text-xs font-semibold text-blue-900 mb-1.5">
+        <div className="rounded-xl border border-blue-100 dark:border-blue-900/60 bg-blue-50/70 dark:bg-blue-950/40 p-3">
+          <div className="flex items-center justify-between text-xs font-semibold text-blue-900 dark:text-blue-200 mb-1.5">
             <span>Extracting notebook outputs</span>
             <span>{progressPercent}%</span>
           </div>
-          <div className="h-2 w-full overflow-hidden rounded-full bg-blue-200/70">
+          <div className="h-2 w-full overflow-hidden rounded-full bg-blue-200/70 dark:bg-blue-900/80">
             <div
               className="h-full bg-blue-600 transition-all duration-200"
               style={{ width: `${progressPercent}%` }}
             />
           </div>
-          <p className="mt-1.5 text-[11px] text-blue-700 truncate">
+          <p className="mt-1.5 text-[11px] text-blue-700 dark:text-blue-300 truncate">
             {progressStatus}
           </p>
         </div>

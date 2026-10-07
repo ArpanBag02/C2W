@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Header } from './components/Header';
 import { UploadZone } from './components/UploadZone';
 import { ExtractionSettings } from './components/ExtractionSettings';
@@ -6,6 +6,17 @@ import { Toolbar, ViewMode, FilterCategory } from './components/Toolbar';
 import { OutputCard } from './components/OutputCard';
 import { PaginatedDocPreview } from './components/PaginatedDocPreview';
 import { ImageLightbox } from './components/ImageLightbox';
+import { DocxPreviewModal } from './components/DocxPreviewModal';
+import { IntelligentGridVisualHelper } from './components/IntelligentGridVisualHelper';
+import {
+  BatchMetadataModal,
+  BatchMetadataPayload,
+} from './components/BatchMetadataModal';
+import { GeneratedHistoryModal } from './components/GeneratedHistoryModal';
+import {
+  DocxGeneratingOverlay,
+  DocxGenerationStep,
+} from './components/DocxGeneratingOverlay';
 import {
   NotebookOutputItem,
   ExtractionConfig,
@@ -14,7 +25,25 @@ import {
 } from './types/notebook';
 import { parseNotebook } from './utils/notebookParser';
 import { generateDocxBlob, exportImagesAsZip } from './utils/docxGenerator';
+import { generatePdfBlob, printCurrentReport } from './utils/pdfGenerator';
 import { generateSampleNotebookJson } from './utils/sampleNotebook';
+import {
+  autoCaptionNotebookItems,
+  isCaptionEmptyOrGeneric,
+  generateAutoCaption,
+} from './utils/autoCaptioner';
+import {
+  computeIntelligentLayout,
+  rearrangeByIntelligentGrid,
+} from './utils/intelligentGrid';
+import {
+  GeneratedDocumentRecord,
+  getHistoryRecords,
+  addHistoryRecord,
+  deleteHistoryRecord,
+  clearAllHistory,
+  downloadHistoryItem,
+} from './utils/historyStorage';
 import {
   FileText,
   Sparkles,
@@ -23,9 +52,45 @@ import {
   CheckCircle2,
   HelpCircle,
   FileCode,
+  Eye,
+  Command,
+  Sun,
+  Moon,
+  History,
+  FileDown,
+  Printer,
+  GripVertical,
 } from 'lucide-react';
 
 export default function App() {
+  // Theme state (persisted to localStorage)
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('colab2doc_theme');
+      if (saved === 'dark' || saved === 'light') return saved;
+      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark'
+        : 'light';
+    }
+    return 'light';
+  });
+
+  // Sync theme with document class and localStorage
+  useEffect(() => {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+    localStorage.setItem('colab2doc_theme', theme);
+  }, [theme]);
+
+  const handleToggleTheme = () => {
+    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  };
+
   // Notebook state
   const [notebookFile, setNotebookFile] = useState<File | null>(null);
   const [notebookJson, setNotebookJson] = useState<any | null>(null);
@@ -37,13 +102,43 @@ export default function App() {
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [progressStatus, setProgressStatus] = useState<string>('');
   const [isExporting, setIsExporting] = useState<boolean>(false);
+  const [isExportingPdf, setIsExportingPdf] = useState<boolean>(false);
   const [hasExtracted, setHasExtracted] = useState<boolean>(false);
+
+  // DOCX Generation Progress & Visual Overlay
+  const [isGeneratingDocx, setIsGeneratingDocx] = useState<boolean>(false);
+  const [docxProgress, setDocxProgress] = useState<number>(0);
+  const [docxStatus, setDocxStatus] = useState<string>('');
+  const [docxStep, setDocxStep] = useState<DocxGenerationStep>('init');
+
+  // AI Auto-Captioning State
+  const [isCaptioning, setIsCaptioning] = useState<boolean>(false);
 
   // Filters & display
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeFilter, setActiveFilter] = useState<FilterCategory>('all');
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [lightboxItem, setLightboxItem] = useState<NotebookOutputItem | null>(null);
+  const [showDocPreviewModal, setShowDocPreviewModal] = useState<boolean>(false);
+  const [showBatchMetadataModal, setShowBatchMetadataModal] = useState<boolean>(false);
+  const [showHistoryModal, setShowHistoryModal] = useState<boolean>(false);
+
+  // Intelligent Grid & Real-Time Page Footprint Helper State
+  const [isIntelligentGridActive, setIsIntelligentGridActive] = useState<boolean>(false);
+  const [showIntelligentGridHelper, setShowIntelligentGridHelper] = useState<boolean>(false);
+
+  // Drag and drop reordering state
+  const [draggedItemId, setDraggedItemId] = useState<string | null>(null);
+  const [dragOverItemId, setDragOverItemId] = useState<string | null>(null);
+  const [dropPosition, setDropPosition] = useState<'before' | 'after' | null>(null);
+
+  // Document Generation History State
+  const [historyRecords, setHistoryRecords] = useState<GeneratedDocumentRecord[]>([]);
+
+  // Load initial history on mount
+  useEffect(() => {
+    setHistoryRecords(getHistoryRecords());
+  }, []);
 
   // Toast feedback
   const [toast, setToast] = useState<{ message: string; type: 'info' | 'success' | 'error' } | null>(null);
@@ -91,104 +186,113 @@ export default function App() {
       }
 
       const codeCells = json.cells.filter((c: any) => c.cell_type === 'code').length;
-      const markdownCells = json.cells.filter((c: any) => c.cell_type === 'markdown').length;
-      const kernel = json.metadata?.kernelspec?.display_name || json.metadata?.language_info?.name;
+      const kernelName = json.metadata?.kernelspec?.display_name || json.metadata?.language_info?.name || 'Python 3';
 
       setNotebookFile(file);
       setNotebookJson(json);
       setNotebookMeta({
         name: file.name,
         size: file.size,
-        totalCells: json.cells.length,
+        cellCount: json.cells.length,
         codeCells,
-        markdownCells,
-        kernelName: kernel,
+        kernelName,
       });
 
-      const baseName = file.name.replace(/\.ipynb$/i, '');
+      // Update doc title suggestion based on file name
+      const cleanBaseName = file.name.replace(/\.ipynb$/i, '').replace(/[_-]/g, ' ');
       setDocxConfig((prev) => ({
         ...prev,
-        reportTitle: `${baseName} — Notebook Outputs`,
-        fileName: `${baseName}_outputs`,
+        reportTitle: `${cleanBaseName} Report`,
+        fileName: file.name.replace(/\.ipynb$/i, ''),
       }));
 
-      setExtractedItems([]);
-      setHasExtracted(false);
-      showToast(`Loaded "${file.name}" with ${codeCells} code cells. Ready to extract!`, 'success');
+      showToast(`Loaded "${file.name}" (${codeCells} code cells). Click "Extract Outputs" to begin.`, 'info');
     } catch (err: any) {
       showToast(err.message || 'Failed to read notebook file', 'error');
     }
   };
 
-  // Handle Sample Notebook
-  const handleLoadSample = async () => {
-    const sampleJson = generateSampleNotebookJson();
-    const mockFile = new File([JSON.stringify(sampleJson)], 'customer_churn_analysis.ipynb', {
-      type: 'application/json',
-    });
+  // Load sample notebook
+  const handleLoadSample = () => {
+    const sample = generateSampleNotebookJson();
+    const codeCells = sample.cells.filter((c: any) => c.cell_type === 'code').length;
 
-    setNotebookFile(mockFile);
-    setNotebookJson(sampleJson);
+    setNotebookFile(null);
+    setNotebookJson(sample);
     setNotebookMeta({
-      name: 'customer_churn_analysis.ipynb',
-      size: 145200,
-      totalCells: sampleJson.cells.length,
-      codeCells: sampleJson.cells.length,
-      markdownCells: 0,
-      kernelName: 'Python 3.10 (ipykernel)',
+      name: 'credit_risk_evaluation_demo.ipynb',
+      size: JSON.stringify(sample).length,
+      cellCount: sample.cells.length,
+      codeCells,
+      kernelName: 'Python 3 (Google Colab GPU)',
     });
 
     setDocxConfig((prev) => ({
       ...prev,
-      reportTitle: 'Customer Churn Predictive Model — Findings & Metrics',
-      reportSubtitle: 'Machine Learning Evaluation, ROC Curves, and Feature Importance Analysis',
-      authorName: 'AI & Analytics Lab',
-      fileName: 'churn_analysis_outputs',
+      reportTitle: 'Credit Risk Analysis & Model Evaluation Report',
+      reportSubtitle: 'Performance metrics, ROC-AUC curves, and confusion matrix catalog',
+      authorName: 'ML Risk Analytics Team',
+      fileName: 'credit_risk_model_report',
     }));
 
-    showToast('Loaded sample machine learning notebook with plots and tables.', 'info');
+    showToast('Loaded demo Machine Learning notebook! Starting output extraction...', 'info');
 
-    // Auto extract sample notebook so the user gets instant joy
+    // Automatically trigger extraction for sample for seamless onboarding
     setTimeout(() => {
-      extractOutputsInternal(sampleJson);
-    }, 100);
+      triggerExtraction(sample, 'credit_risk_evaluation_demo.ipynb');
+    }, 400);
   };
 
-  // Extract function
-  const extractOutputsInternal = async (jsonToUse = notebookJson) => {
-    if (!jsonToUse) {
-      showToast('Please select or upload a notebook first.', 'error');
+  // Trigger Extraction
+  const handleExtract = () => {
+    if (!notebookJson) {
+      showToast('Please select or drop a notebook file first.', 'error');
       return;
     }
+    triggerExtraction(notebookJson, notebookMeta?.name || 'notebook.ipynb');
+  };
 
+  const triggerExtraction = (json: any, filename: string) => {
     setIsProcessing(true);
-    setProgressPercent(5);
-    setProgressStatus('Scanning code cells and output objects...');
+    setProgressPercent(10);
+    setProgressStatus('Parsing code cells and notebook structure...');
 
-    try {
-      const items = await parseNotebook(
-        jsonToUse,
-        extractionConfig,
-        (percent, statusText) => {
-          setProgressPercent(percent);
-          setProgressStatus(statusText);
-        }
-      );
+    setTimeout(async () => {
+      try {
+        setProgressPercent(40);
+        setProgressStatus('Isolating plots, HTML tables, and execution logs...');
 
-      setExtractedItems(items);
-      setHasExtracted(true);
-      showToast(`Extracted ${items.length} output figures successfully!`, 'success');
-    } catch (err: any) {
-      showToast(err.message || 'Error parsing outputs', 'error');
-    } finally {
-      setIsProcessing(false);
-    }
+        const items = await parseNotebook(json, extractionConfig);
+
+        setProgressPercent(80);
+        setProgressStatus(`Discovered ${items.length} output figures. Formatting previews...`);
+
+        setTimeout(() => {
+          setExtractedItems(items);
+          setHasExtracted(true);
+          setProgressPercent(100);
+          setIsProcessing(false);
+
+          if (items.length === 0) {
+            showToast(
+              'No matching outputs found in notebook code cells. Check extraction rules on the left.',
+              'info'
+            );
+          } else {
+            showToast(
+              `Extracted ${items.length} output figures successfully!`,
+              'success'
+            );
+          }
+        }, 300);
+      } catch (err: any) {
+        setIsProcessing(false);
+        showToast(err.message || 'Failed to extract outputs from notebook', 'error');
+      }
+    }, 350);
   };
 
-  const handleExtract = () => {
-    extractOutputsInternal();
-  };
-
+  // Reset workspace
   const handleReset = () => {
     setNotebookFile(null);
     setNotebookJson(null);
@@ -206,11 +310,102 @@ export default function App() {
       return;
     }
 
+    setIsGeneratingDocx(true);
     setIsExporting(true);
-    showToast('Compiling OpenXML Word document and embedding images...', 'info');
+    setDocxProgress(5);
+    setDocxStatus('Initializing Word document layout and typography...');
+    setDocxStep('init');
 
     try {
       const blob = await generateDocxBlob(
+        extractedItems,
+        docxConfig,
+        notebookMeta?.name || 'notebook.ipynb',
+        (percent, statusText) => {
+          setDocxProgress(percent);
+          setDocxStatus(statusText);
+          if (percent < 15) {
+            setDocxStep('init');
+          } else if (percent < 80) {
+            setDocxStep('figures');
+          } else if (percent < 95) {
+            setDocxStep('package');
+          } else {
+            setDocxStep('verify');
+          }
+        }
+      );
+
+      setDocxProgress(100);
+      setDocxStatus(`Completed! Packaging ${active.length} figures...`);
+      setDocxStep('verify');
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const cleanName = (docxConfig.fileName || 'notebook_outputs')
+        .trim()
+        .replace(/\.(docx|pdf)$/i, '')
+        .replace(/[\\/:*?"<>|]/g, '-');
+      a.download = `${cleanName}.docx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+      // Save into generated documents history
+      try {
+        const captions = active.map(
+          (it, idx) => `Figure ${idx + 1}: ${it.caption || 'Output figure'}`
+        );
+        const record = await addHistoryRecord(
+          {
+            title: docxConfig.reportTitle || `${cleanName}.docx`,
+            subtitle: docxConfig.reportSubtitle,
+            author: docxConfig.authorName,
+            fileName: `${cleanName}.docx`,
+            itemCount: active.length,
+            notebookName: notebookMeta?.name || 'notebook.ipynb',
+            format: 'docx',
+            captionsSummary: captions,
+          },
+          blob
+        );
+        setHistoryRecords((prev) => [record, ...prev.filter((r) => r.id !== record.id)].slice(0, 50));
+      } catch (histErr) {
+        console.warn('Failed to record document in history:', histErr);
+      }
+
+      // Brief delay so user sees 100% completion in overlay before it dismisses
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      showToast(`Word report (${active.length} figures) generated, downloaded, and added to History!`, 'success');
+    } catch (err: any) {
+      showToast(err.message || 'Failed to generate Word document', 'error');
+    } finally {
+      setIsGeneratingDocx(false);
+      setIsExporting(false);
+    }
+  };
+
+  // Export PDF (Client-side library generation)
+  const handleExportPdf = async () => {
+    const active = extractedItems.filter((i) => i.selected !== false);
+    if (active.length === 0) {
+      showToast('Please select at least one output figure to export to PDF.', 'error');
+      return;
+    }
+
+    setIsExportingPdf(true);
+    showToast('Generating PDF report...', 'info');
+
+    try {
+      const cleanName = (docxConfig.fileName || 'notebook_outputs')
+        .trim()
+        .replace(/\.(docx|pdf)$/i, '')
+        .replace(/[\\/:*?"<>|]/g, '-');
+
+      const blob = await generatePdfBlob(
         extractedItems,
         docxConfig,
         notebookMeta?.name || 'notebook.ipynb'
@@ -219,22 +414,89 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      const cleanName = (docxConfig.fileName || 'notebook_outputs')
-        .trim()
-        .replace(/\.docx$/i, '')
-        .replace(/[\\/:*?"<>|]/g, '-');
-      a.download = `${cleanName}.docx`;
+      a.download = `${cleanName}.pdf`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
 
-      showToast(`Word report (${active.length} figures) generated and downloaded!`, 'success');
+      // Save PDF into history
+      try {
+        const captions = active.map(
+          (it, idx) => `Figure ${idx + 1}: ${it.caption || 'Output figure'}`
+        );
+        const record = await addHistoryRecord(
+          {
+            title: docxConfig.reportTitle || `${cleanName}.pdf`,
+            subtitle: docxConfig.reportSubtitle,
+            author: docxConfig.authorName,
+            fileName: `${cleanName}.pdf`,
+            itemCount: active.length,
+            notebookName: notebookMeta?.name || 'notebook.ipynb',
+            format: 'pdf',
+            captionsSummary: captions,
+          },
+          blob
+        );
+        setHistoryRecords((prev) => [record, ...prev.filter((r) => r.id !== record.id)].slice(0, 50));
+      } catch (histErr) {
+        console.warn('Failed to record PDF in history:', histErr);
+      }
+
+      showToast(`PDF report (${active.length} figures) generated, downloaded, and added to History!`, 'success');
     } catch (err: any) {
-      showToast(err.message || 'Failed to generate Word document', 'error');
+      showToast(err.message || 'Failed to generate PDF report', 'error');
     } finally {
-      setIsExporting(false);
+      setIsExportingPdf(false);
     }
+  };
+
+  // Print PDF (Browser Native Print-to-PDF)
+  const handlePrintPdf = () => {
+    printCurrentReport();
+  };
+
+  // Real-time Intelligent Grid layout and page footprint estimation
+  const intelligentLayoutSummary = useMemo(() => {
+    return computeIntelligentLayout(extractedItems, docxConfig);
+  }, [extractedItems, docxConfig]);
+
+  // Intelligent Grid Aspect-Ratio Optimization Toggle Handler
+  const handleToggleIntelligentGrid = (active: boolean) => {
+    setIsIntelligentGridActive(active);
+    if (active) {
+      // Reorder figures by aspect-ratio affinity for optimal document packing density
+      const reordered = rearrangeByIntelligentGrid(extractedItems);
+      setExtractedItems(reordered);
+      setDocxConfig((prev) => ({
+        ...prev,
+        autoLayout: 'side-by-side',
+      }));
+      showToast(
+        'Intelligent Grid enabled: figures rearranged by aspect ratio & auto-layout set to Side-by-Side.',
+        'info'
+      );
+    } else {
+      setDocxConfig((prev) => ({
+        ...prev,
+        autoLayout: 'single-column',
+      }));
+      showToast(
+        'Intelligent Grid disabled: Standard Single-Column layout restored.',
+        'info'
+      );
+    }
+  };
+
+  // Apply rearrangement from the Intelligent Grid visual helper modal
+  const handleApplyIntelligentRearrangement = (reorderedItems: NotebookOutputItem[]) => {
+    setExtractedItems(reorderedItems);
+    setIsIntelligentGridActive(true);
+    setDocxConfig((prev) => ({
+      ...prev,
+      autoLayout: 'side-by-side',
+    }));
+    showToast('Applied Intelligent Grid layout arrangement!', 'success');
   };
 
   // Export ZIP of PNGs
@@ -254,14 +516,63 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${docxConfig.fileName || 'outputs'}_images.zip`;
+      const cleanZipName = `${docxConfig.fileName || 'outputs'}_images.zip`;
+      a.download = cleanZipName;
       document.body.appendChild(a);
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
-      showToast(`Downloaded ZIP with ${active.length} figures!`, 'success');
+
+      // Save ZIP export into history
+      try {
+        const captions = active.map(
+          (it, idx) => `Figure ${idx + 1}: ${it.caption || 'Output figure'}`
+        );
+        const record = await addHistoryRecord(
+          {
+            title: cleanZipName,
+            subtitle: `Archive of ${active.length} high-resolution PNG outputs`,
+            author: docxConfig.authorName,
+            fileName: cleanZipName,
+            itemCount: active.length,
+            notebookName: notebookMeta?.name || 'notebook.ipynb',
+            format: 'zip',
+            captionsSummary: captions,
+          },
+          blob
+        );
+        setHistoryRecords((prev) => [record, ...prev.filter((r) => r.id !== record.id)].slice(0, 50));
+      } catch (histErr) {
+        console.warn('Failed to record ZIP in history:', histErr);
+      }
+
+      showToast(`Downloaded ZIP with ${active.length} figures and added to History!`, 'success');
     } catch (err: any) {
       showToast(err.message || 'Failed to package ZIP', 'error');
+    }
+  };
+
+  // History Actions
+  const handleDeleteHistoryRecord = async (id: string) => {
+    const updated = await deleteHistoryRecord(id);
+    setHistoryRecords(updated);
+    showToast('Removed document from history.', 'info');
+  };
+
+  const handleClearAllHistory = async () => {
+    await clearAllHistory();
+    setHistoryRecords([]);
+    showToast('Cleared all document generation history.', 'info');
+  };
+
+  const handleDownloadHistoryRecord = async (record: GeneratedDocumentRecord) => {
+    const success = await downloadHistoryItem(record);
+    if (success) {
+      showToast(`Downloaded "${record.fileName}" from history!`, 'success');
+      return true;
+    } else {
+      showToast(`Failed to retrieve file from local history storage.`, 'error');
+      return false;
     }
   };
 
@@ -298,13 +609,191 @@ export default function App() {
     showToast('Output removed.', 'info');
   };
 
-  const handleUpdateCaption = (id: string, newCaption: string, newNotes?: string) => {
+  const handleUpdateCaption = (
+    id: string,
+    newCaption: string,
+    newNotes?: string,
+    newAuthor?: string,
+    newReportDate?: string,
+    newSectionTag?: string
+  ) => {
     setExtractedItems((prev) =>
       prev.map((item) =>
-        item.id === id ? { ...item, caption: newCaption, notes: newNotes } : item
+        item.id === id
+          ? {
+              ...item,
+              caption: newCaption,
+              notes: newNotes,
+              author: newAuthor !== undefined ? newAuthor : item.author,
+              reportDate: newReportDate !== undefined ? newReportDate : item.reportDate,
+              sectionTag: newSectionTag !== undefined ? newSectionTag : item.sectionTag,
+            }
+          : item
       )
     );
-    showToast('Figure updated.', 'success');
+  };
+
+  // Drag and Drop reordering handlers
+  const handleDragStart = (e: React.DragEvent, id: string, index: number) => {
+    setDraggedItemId(id);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', id);
+  };
+
+  const handleDragOver = (e: React.DragEvent, id: string, index: number) => {
+    e.preventDefault();
+    if (!draggedItemId || draggedItemId === id) return;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const isTopHalf = e.clientY < rect.top + rect.height / 2;
+    setDragOverItemId(id);
+    setDropPosition(isTopHalf ? 'before' : 'after');
+  };
+
+  const handleDragEnter = (e: React.DragEvent, id: string, index: number) => {
+    e.preventDefault();
+  };
+
+  const handleDragLeave = (e: React.DragEvent, id: string, index: number) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      if (dragOverItemId === id) {
+        setDragOverItemId(null);
+        setDropPosition(null);
+      }
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent, targetId: string, index: number) => {
+    e.preventDefault();
+    if (!draggedItemId || draggedItemId === targetId) {
+      setDraggedItemId(null);
+      setDragOverItemId(null);
+      setDropPosition(null);
+      return;
+    }
+
+    setExtractedItems((prev) => {
+      const sourceIdx = prev.findIndex((i) => i.id === draggedItemId);
+      const targetIdx = prev.findIndex((i) => i.id === targetId);
+      if (sourceIdx === -1 || targetIdx === -1) return prev;
+
+      const copy = [...prev];
+      const [moved] = copy.splice(sourceIdx, 1);
+      const newTargetIdx = copy.findIndex((i) => i.id === targetId);
+      const insertIdx = dropPosition === 'after' ? newTargetIdx + 1 : newTargetIdx;
+      copy.splice(insertIdx, 0, moved);
+      return copy;
+    });
+
+    showToast('Reordered figures. Figure numbers automatically updated.', 'success');
+    setDraggedItemId(null);
+    setDragOverItemId(null);
+    setDropPosition(null);
+  };
+
+  const handleDragEnd = () => {
+    setDraggedItemId(null);
+    setDragOverItemId(null);
+    setDropPosition(null);
+  };
+
+  // Bulk Apply Metadata across selected (or all) items
+  const handleApplyBatchMetadata = (payload: BatchMetadataPayload) => {
+    const isTargetSelected = payload.targetMode === 'selected';
+
+    let updatedCount = 0;
+    setExtractedItems((prev) =>
+      prev.map((item) => {
+        const shouldUpdate = isTargetSelected ? item.selected !== false : true;
+        if (!shouldUpdate) return item;
+
+        updatedCount++;
+        let updatedNotes = item.notes;
+        if (payload.applyNotes) {
+          if (payload.notesMode === 'replace') {
+            updatedNotes = payload.notes;
+          } else if (payload.notesMode === 'append') {
+            updatedNotes =
+              item.notes && item.notes.trim()
+                ? `${item.notes}\n${payload.notes}`
+                : payload.notes;
+          } else if (payload.notesMode === 'fill-empty') {
+            if (!item.notes || !item.notes.trim()) {
+              updatedNotes = payload.notes;
+            }
+          }
+        }
+
+        let updatedCaption = item.caption;
+        if (payload.applyCaptionPrefix && payload.captionPrefix) {
+          if (!updatedCaption.startsWith(payload.captionPrefix)) {
+            updatedCaption = `${payload.captionPrefix}${updatedCaption}`;
+          }
+        }
+
+        return {
+          ...item,
+          author: payload.applyAuthor ? payload.author : item.author,
+          reportDate: payload.applyReportDate ? payload.reportDate : item.reportDate,
+          sectionTag: payload.applySectionTag ? payload.sectionTag : item.sectionTag,
+          notes: updatedNotes,
+          caption: updatedCaption,
+        };
+      })
+    );
+
+    // Sync with global cover page config if enabled
+    if (payload.syncGlobalCover) {
+      setDocxConfig((prev) => ({
+        ...prev,
+        authorName: payload.applyAuthor && payload.author ? payload.author : prev.authorName,
+        reportDate: payload.applyReportDate && payload.reportDate ? payload.reportDate : prev.reportDate,
+      }));
+    }
+
+    showToast(
+      `Updated common metadata across ${updatedCount} output figure${updatedCount === 1 ? '' : 's'}.`,
+      'success'
+    );
+  };
+
+  // AI-Assisted Auto-Captioning for Empty / Generic Captions
+  const emptyCaptionCount = useMemo(() => {
+    return extractedItems.filter((i) => isCaptionEmptyOrGeneric(i.caption)).length;
+  }, [extractedItems]);
+
+  const handleGenerateAllCaptions = async () => {
+    if (extractedItems.length === 0) {
+      showToast('Please extract or load a notebook first before generating captions.', 'info');
+      return;
+    }
+
+    setIsCaptioning(true);
+    try {
+      // Yield briefly to event loop for smooth UI feedback and spinner rendering
+      await new Promise((r) => setTimeout(r, 200));
+
+      const { updatedItems, updatedCount } = autoCaptionNotebookItems(extractedItems);
+      setExtractedItems(updatedItems);
+
+      if (updatedCount > 0) {
+        showToast(
+          `Generated descriptive captions for ${updatedCount} figure${updatedCount > 1 ? 's' : ''} based on plot trends and table headers!`,
+          'success'
+        );
+      } else {
+        // If all items already had captions, refresh them with descriptive heuristic insights
+        const forced = autoCaptionNotebookItems(extractedItems, { forceAll: true });
+        setExtractedItems(forced.updatedItems);
+        showToast(
+          `Refreshed all ${forced.updatedCount} figure captions with AI trend heuristics!`,
+          'success'
+        );
+      }
+    } catch (err: any) {
+      showToast('Error auto-generating captions. Please try again.', 'error');
+    } finally {
+      setIsCaptioning(false);
+    }
   };
 
   const handleMoveUp = (index: number) => {
@@ -346,7 +835,19 @@ export default function App() {
         const matchCell = `cell ${item.cellIndex + 1}`.includes(q);
         const matchText = item.rawText?.toLowerCase().includes(q);
         const matchSubtype = item.subtype.toLowerCase().includes(q);
-        if (!matchCaption && !matchNotes && !matchCell && !matchText && !matchSubtype) {
+        const matchAuthor = item.author?.toLowerCase().includes(q);
+        const matchDate = item.reportDate?.toLowerCase().includes(q);
+        const matchSection = item.sectionTag?.toLowerCase().includes(q);
+        if (
+          !matchCaption &&
+          !matchNotes &&
+          !matchCell &&
+          !matchText &&
+          !matchSubtype &&
+          !matchAuthor &&
+          !matchDate &&
+          !matchSection
+        ) {
           return false;
         }
       }
@@ -355,19 +856,125 @@ export default function App() {
     });
   }, [extractedItems, activeFilter, searchQuery]);
 
+  // Global Keyboard Shortcuts
+  // - Ctrl+Enter (Cmd+Enter): Trigger extraction
+  // - Ctrl+S (Cmd+S): Save / Download Word Document (.docx)
+  // - Alt+T: Toggle light/dark theme
+  // - Alt+H: Open Generated Documents History
+  // - Esc: Close Modals / Clear Selection
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const isCtrlOrMeta = e.ctrlKey || e.metaKey;
+
+      // 1. Ctrl+Enter: Trigger Extraction
+      if (isCtrlOrMeta && e.key === 'Enter') {
+        e.preventDefault();
+        if (isProcessing) return;
+        if (notebookJson) {
+          handleExtract();
+        } else {
+          showToast('Please upload or load a notebook first to extract (Ctrl+Enter).', 'info');
+        }
+        return;
+      }
+
+      // 2. Ctrl+S: Save / Download Word Document
+      if (isCtrlOrMeta && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        if (isExporting) return;
+        if (extractedItems.length === 0) {
+          showToast('No output figures extracted yet. Extract a notebook first before saving Word doc (Ctrl+S).', 'info');
+          return;
+        }
+        const active = extractedItems.filter((i) => i.selected !== false);
+        if (active.length === 0) {
+          showToast('No figures selected. Select at least one figure to export.', 'error');
+          return;
+        }
+        handleDownloadDocx();
+        return;
+      }
+
+      // 3. Alt+T: Theme toggle
+      if (e.altKey && (e.key === 't' || e.key === 'T')) {
+        e.preventDefault();
+        handleToggleTheme();
+        return;
+      }
+
+      // 4. Alt+H: History modal
+      if (e.altKey && (e.key === 'h' || e.key === 'H')) {
+        e.preventDefault();
+        setShowHistoryModal((prev) => !prev);
+        return;
+      }
+
+      // 5. Esc: Close Lightbox -> Close History -> Close Batch Metadata Modal -> Close Doc Preview Modal -> Clear Selection
+      if (e.key === 'Escape') {
+        if (lightboxItem) {
+          e.preventDefault();
+          setLightboxItem(null);
+          return;
+        }
+        if (showHistoryModal) {
+          e.preventDefault();
+          setShowHistoryModal(false);
+          return;
+        }
+        if (showBatchMetadataModal) {
+          e.preventDefault();
+          setShowBatchMetadataModal(false);
+          return;
+        }
+        if (showDocPreviewModal) {
+          e.preventDefault();
+          setShowDocPreviewModal(false);
+          return;
+        }
+        const hasSelection = extractedItems.some((i) => i.selected !== false);
+        if (hasSelection) {
+          e.preventDefault();
+          handleDeselectAll();
+          return;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    notebookJson,
+    extractedItems,
+    lightboxItem,
+    showHistoryModal,
+    showDocPreviewModal,
+    showBatchMetadataModal,
+    isProcessing,
+    isExporting,
+    docxConfig,
+    notebookMeta,
+    extractionConfig,
+    theme,
+  ]);
+
   const selectedActiveCount = extractedItems.filter((i) => i.selected !== false).length;
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans selection:bg-blue-100 selection:text-blue-900">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 flex flex-col font-sans selection:bg-blue-100 dark:selection:bg-blue-900 selection:text-blue-900 dark:selection:text-blue-100 transition-colors">
       {/* Top Header */}
       <Header
         hasItems={extractedItems.length > 0}
         itemCount={selectedActiveCount}
         onLoadSample={handleLoadSample}
         onDownloadDocx={handleDownloadDocx}
+        onPreviewDocx={() => setShowDocPreviewModal(true)}
         onReset={handleReset}
         isProcessing={isProcessing}
         isExporting={isExporting}
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
+        historyCount={historyRecords.length}
+        onOpenHistory={() => setShowHistoryModal(true)}
       />
 
       {/* Main Workspace Layout */}
@@ -376,9 +983,9 @@ export default function App() {
           {/* Left Column: Input, Rules, Settings (4 cols on desktop) */}
           <div className="lg:col-span-4 space-y-4 lg:sticky lg:top-20">
             {/* Step 1: Upload / File Info */}
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-2xs">
-              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-700 mb-3">
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-100 text-blue-700 text-[11px]">
+            <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-2xs transition-colors">
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-200 mb-3">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 text-[11px]">
                   1
                 </span>
                 <span>Select Notebook</span>
@@ -398,9 +1005,9 @@ export default function App() {
             </div>
 
             {/* Step 2: Extraction Rules & Word Configuration */}
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-2xs">
-              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-700 mb-3">
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-100 text-blue-700 text-[11px]">
+            <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-2xs transition-colors">
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-200 mb-3">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 text-[11px]">
                   2
                 </span>
                 <span>Settings & Word Style</span>
@@ -412,12 +1019,17 @@ export default function App() {
                 docxConfig={docxConfig}
                 onDocxConfigChange={setDocxConfig}
                 disabled={isProcessing}
+                onPreviewDocx={() => setShowDocPreviewModal(true)}
+                onGenerateAllCaptions={handleGenerateAllCaptions}
+                itemCount={extractedItems.length}
+                emptyCaptionCount={emptyCaptionCount}
+                isCaptioning={isCaptioning}
               />
             </div>
 
             {/* Privacy note */}
-            <div className="rounded-xl border border-slate-200 bg-white p-3 text-[11px] text-slate-500 shadow-2xs">
-              <span className="font-semibold text-slate-700">Client-Side Processing:</span> Files are parsed entirely inside your browser sandbox. Code cells and source code are strictly omitted so your report contains exclusively genuine execution outputs.
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 text-[11px] text-slate-500 dark:text-slate-400 shadow-2xs transition-colors">
+              <span className="font-semibold text-slate-700 dark:text-slate-300">Client-Side Processing:</span> Files are parsed entirely inside your browser sandbox. Code cells and source code are strictly omitted so your report contains exclusively genuine execution outputs.
             </div>
           </div>
 
@@ -438,7 +1050,23 @@ export default function App() {
                   onDeselectAll={handleDeselectAll}
                   onDeleteSelected={handleDeleteSelected}
                   onExportZip={handleExportZip}
+                  onExportPdf={handleExportPdf}
+                  onPrintPdf={handlePrintPdf}
+                  isExportingPdf={isExportingPdf}
                   selectedCount={selectedActiveCount}
+                  onOpenDocPreviewModal={() => setShowDocPreviewModal(true)}
+                  onOpenBatchMetadata={() => setShowBatchMetadataModal(true)}
+                  onOpenHistory={() => setShowHistoryModal(true)}
+                  historyCount={historyRecords.length}
+                  isIntelligentGridActive={isIntelligentGridActive}
+                  onToggleIntelligentGrid={handleToggleIntelligentGrid}
+                  onOpenIntelligentGridHelper={() => setShowIntelligentGridHelper(true)}
+                  estimatedPagesCount={
+                    isIntelligentGridActive
+                      ? intelligentLayoutSummary.intelligentPagesCount
+                      : intelligentLayoutSummary.standardPagesCount
+                  }
+                  pagesSaved={intelligentLayoutSummary.pagesSaved}
                 />
 
                 {/* Main Views */}
@@ -451,10 +1079,10 @@ export default function App() {
                     isExporting={isExporting}
                   />
                 ) : filteredItems.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center p-12 text-center rounded-2xl border border-dashed border-slate-200 bg-white">
-                    <AlertCircle className="h-9 w-9 text-slate-300 mb-2" />
-                    <h4 className="text-sm font-semibold text-slate-700">No matching outputs found</h4>
-                    <p className="text-xs text-slate-400 mt-1">
+                  <div className="flex flex-col items-center justify-center p-12 text-center rounded-2xl border border-dashed border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+                    <AlertCircle className="h-9 w-9 text-slate-300 dark:text-slate-600 mb-2" />
+                    <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-200">No matching outputs found</h4>
+                    <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
                       Try clearing your search query or selecting a different category filter.
                     </p>
                   </div>
@@ -468,17 +1096,28 @@ export default function App() {
                         total={filteredItems.length}
                         isFirst={idx === 0}
                         isLast={idx === filteredItems.length - 1}
+                        viewMode={viewMode}
                         onToggleSelect={handleToggleSelect}
                         onUpdateCaption={handleUpdateCaption}
                         onDelete={handleDeleteOne}
                         onMoveUp={handleMoveUp}
                         onMoveDown={handleMoveDown}
                         onOpenLightbox={setLightboxItem}
+                        draggable={true}
+                        onDragStart={handleDragStart}
+                        onDragOver={handleDragOver}
+                        onDragEnter={handleDragEnter}
+                        onDragLeave={handleDragLeave}
+                        onDrop={handleDrop}
+                        onDragEnd={handleDragEnd}
+                        isDragging={draggedItemId === item.id}
+                        isDropTarget={dragOverItemId === item.id && draggedItemId !== item.id}
+                        dropPosition={dragOverItemId === item.id ? dropPosition : null}
                       />
                     ))}
                   </div>
                 ) : (
-                  <div className="space-y-4">
+                  <div className="space-y-3">
                     {filteredItems.map((item, idx) => (
                       <OutputCard
                         key={item.id}
@@ -487,12 +1126,23 @@ export default function App() {
                         total={filteredItems.length}
                         isFirst={idx === 0}
                         isLast={idx === filteredItems.length - 1}
+                        viewMode={viewMode}
                         onToggleSelect={handleToggleSelect}
                         onUpdateCaption={handleUpdateCaption}
                         onDelete={handleDeleteOne}
                         onMoveUp={handleMoveUp}
                         onMoveDown={handleMoveDown}
                         onOpenLightbox={setLightboxItem}
+                        draggable={true}
+                        onDragStart={handleDragStart}
+                        onDragOver={handleDragOver}
+                        onDragEnter={handleDragEnter}
+                        onDragLeave={handleDragLeave}
+                        onDrop={handleDrop}
+                        onDragEnd={handleDragEnd}
+                        isDragging={draggedItemId === item.id}
+                        isDropTarget={dragOverItemId === item.id && draggedItemId !== item.id}
+                        dropPosition={dragOverItemId === item.id ? dropPosition : null}
                       />
                     ))}
                   </div>
@@ -500,16 +1150,16 @@ export default function App() {
               </>
             ) : (
               /* Empty State when no notebook extracted */
-              <div className="flex flex-col items-center justify-center p-12 sm:p-16 text-center rounded-2xl border border-dashed border-slate-200 bg-white shadow-2xs">
-                <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-50 text-blue-600 mb-4 border border-blue-100 shadow-xs">
+              <div className="flex flex-col items-center justify-center p-12 sm:p-16 text-center rounded-2xl border border-dashed border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs transition-colors">
+                <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-50 dark:bg-blue-950/80 text-blue-600 dark:text-blue-400 mb-4 border border-blue-100 dark:border-blue-900 shadow-xs">
                   <FileText className="h-8 w-8" />
                 </div>
-                <h3 className="text-base font-bold text-slate-900">
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
                   Ready to Extract Notebook Outputs
                 </h3>
-                <p className="text-xs text-slate-500 max-w-md mt-1.5 leading-relaxed">
-                  Upload any Google Colab or Jupyter <code className="font-mono text-blue-600 bg-blue-50 px-1 py-0.5 rounded">.ipynb</code> file.
-                  Outputs will appear here in execution sequence — plots, data tables, and streams — ready to be captioned and exported into a Word document.
+                <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mt-1.5 leading-relaxed">
+                  Upload any Google Colab or Jupyter <code className="font-mono text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950 px-1 py-0.5 rounded">.ipynb</code> file.
+                  Outputs will appear here in execution sequence — plots, data tables, and streams — ready to be captioned, reordered by drag-and-drop, and exported into Word or PDF documents.
                 </p>
 
                 <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
@@ -521,20 +1171,31 @@ export default function App() {
                     <Sparkles className="h-4 w-4" />
                     <span>Load Demo ML Notebook</span>
                   </button>
+
+                  {historyRecords.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowHistoryModal(true)}
+                      className="inline-flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-750 transition active:scale-95"
+                    >
+                      <History className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                      <span>View History ({historyRecords.length})</span>
+                    </button>
+                  )}
                 </div>
 
                 <div className="mt-10 grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-lg text-left text-xs">
-                  <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-                    <span className="font-bold text-slate-800 block mb-1">Pure Outputs</span>
-                    <p className="text-[11px] text-slate-500">Source code cells are automatically excluded from the final report.</p>
+                  <div className="rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-850/60 p-3">
+                    <span className="font-bold text-slate-800 dark:text-slate-200 block mb-1">Drag-and-Drop Order</span>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Reorder figures dynamically before generating reports. Sequential numbers update live.</p>
                   </div>
-                  <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-                    <span className="font-bold text-slate-800 block mb-1">Auto Numbering</span>
-                    <p className="text-[11px] text-slate-500">Figures are sequentially numbered (Fig 01, 02) and renumbered on deletions.</p>
+                  <div className="rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-850/60 p-3">
+                    <span className="font-bold text-slate-800 dark:text-slate-200 block mb-1">Word & PDF Reports</span>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Generate both Microsoft Word (.docx) and portable PDF documents in one click.</p>
                   </div>
-                  <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-                    <span className="font-bold text-slate-800 block mb-1">Native Word</span>
-                    <p className="text-[11px] text-slate-500">Standard OpenXML format opens seamlessly in MS Word, Google Docs, and LibreOffice.</p>
+                  <div className="rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-850/60 p-3">
+                    <span className="font-bold text-slate-800 dark:text-slate-200 block mb-1">Persistent History</span>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Previously generated files are preserved for instant re-download anytime.</p>
                   </div>
                 </div>
               </div>
@@ -551,6 +1212,92 @@ export default function App() {
         onNavigate={(newItem) => setLightboxItem(newItem)}
       />
 
+      {/* Prepared DOCX Document Fullscreen Preview Modal (Option to display before downloading) */}
+      <DocxPreviewModal
+        isOpen={showDocPreviewModal}
+        onClose={() => setShowDocPreviewModal(false)}
+        items={extractedItems}
+        config={docxConfig}
+        notebookFilename={notebookMeta?.name || 'notebook.ipynb'}
+        onDownloadDocx={handleDownloadDocx}
+        isExporting={isExporting}
+      />
+
+      {/* Batch Metadata Modal to edit author, date, notes across selected items */}
+      <BatchMetadataModal
+        isOpen={showBatchMetadataModal}
+        onClose={() => setShowBatchMetadataModal(false)}
+        selectedItems={extractedItems.filter((i) => i.selected !== false)}
+        allItems={extractedItems}
+        defaultAuthor={docxConfig.authorName}
+        defaultDate={docxConfig.reportDate}
+        onApply={handleApplyBatchMetadata}
+      />
+
+      {/* Generated Documents History Modal */}
+      <GeneratedHistoryModal
+        isOpen={showHistoryModal}
+        onClose={() => setShowHistoryModal(false)}
+        records={historyRecords}
+        onDeleteRecord={handleDeleteHistoryRecord}
+        onClearHistory={handleClearAllHistory}
+        onDownloadRecord={handleDownloadHistoryRecord}
+        onExportPdf={handleExportPdf}
+        onPrintPdf={handlePrintPdf}
+        isExportingPdf={isExportingPdf}
+        selectedCount={selectedActiveCount}
+      />
+
+      {/* Visual Progress Bar & Spinner Overlay for DOCX generation */}
+      <DocxGeneratingOverlay
+        isOpen={isGeneratingDocx}
+        progress={docxProgress}
+        statusText={docxStatus}
+        step={docxStep}
+        totalFigures={selectedActiveCount}
+        fileName={docxConfig.fileName || 'notebook_outputs'}
+      />
+
+      {/* Intelligent Grid Real-Time Page Footprint & Visual Breakdown Helper Modal */}
+      <IntelligentGridVisualHelper
+        isOpen={showIntelligentGridHelper}
+        onClose={() => setShowIntelligentGridHelper(false)}
+        items={extractedItems}
+        config={docxConfig}
+        isIntelligentGridActive={isIntelligentGridActive}
+        onToggleIntelligentGrid={handleToggleIntelligentGrid}
+        onApplyRearrangement={handleApplyIntelligentRearrangement}
+        onOpenDocPreviewModal={() => {
+          setShowIntelligentGridHelper(false);
+          setShowDocPreviewModal(true);
+        }}
+      />
+
+      {/* Subtle Keyboard Shortcuts Guide Badge */}
+      <div className="fixed bottom-4 left-4 z-30 hidden lg:flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md px-3 py-1.5 text-[11px] text-slate-500 dark:text-slate-400 shadow-sm">
+        <Command className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+        <span className="font-medium text-slate-700 dark:text-slate-300">Shortcuts:</span>
+        <span className="flex items-center gap-1 font-mono">
+          <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700">Ctrl+Enter</kbd>
+          <span className="text-[10px] text-slate-500 dark:text-slate-400">Extract</span>
+        </span>
+        <span className="text-slate-300 dark:text-slate-700">·</span>
+        <span className="flex items-center gap-1 font-mono">
+          <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700">Ctrl+S</kbd>
+          <span className="text-[10px] text-slate-500 dark:text-slate-400">Save Docx</span>
+        </span>
+        <span className="text-slate-300 dark:text-slate-700">·</span>
+        <span className="flex items-center gap-1 font-mono">
+          <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700">Alt+T</kbd>
+          <span className="text-[10px] text-slate-500 dark:text-slate-400">Theme</span>
+        </span>
+        <span className="text-slate-300 dark:text-slate-700">·</span>
+        <span className="flex items-center gap-1 font-mono">
+          <kbd className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700">Alt+H</kbd>
+          <span className="text-[10px] text-slate-500 dark:text-slate-400">History</span>
+        </span>
+      </div>
+
       {/* Floating Toast Notification */}
       {toast && (
         <div
@@ -559,7 +1306,7 @@ export default function App() {
             toast.type === 'error'
               ? 'bg-rose-900 text-white border border-rose-800 shadow-rose-950/20'
               : toast.type === 'success'
-              ? 'bg-slate-900 text-white border border-slate-800 shadow-slate-950/20'
+              ? 'bg-slate-900 dark:bg-slate-800 text-white border border-slate-800 dark:border-slate-700 shadow-slate-950/20'
               : 'bg-blue-900 text-white border border-blue-800 shadow-blue-950/20'
           }`}
         >
